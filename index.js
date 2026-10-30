@@ -54,10 +54,14 @@ async function startServer() {
     // car details page
 
     app.get("/cars/:id", async (req, res) => {
-      const {id} = req.params;
-      const result = await carCollection.findOne({ _id: new ObjectId(id) });
-      res.send(result);
-    })
+    try {
+      const car = await carCollection.findOne({ _id: new ObjectId(req.params.id) });
+      if (!car) return res.status(404).send({ message: "Car not found" });
+      res.send(car);
+    } catch (err) {
+      res.status(400).send({ message: "Invalid car id" });
+    }
+  });
 
     // edit car details
 
@@ -74,6 +78,21 @@ async function startServer() {
           res.status(500).send({ message: "Failed to update car" });
         }
     });
+
+
+    // Delete Car from Website
+
+    app.delete("/cars/:id", async (req, res) => {
+      try {
+        const result = await carCollection.deleteOne({
+          _id: new ObjectId(req.params.id),
+        });
+        res.send(result);
+      } catch (err) {
+        console.error(err);
+        res.status(500).send({ message: "Failed to delete car" });
+      }
+    })
 
 
 
