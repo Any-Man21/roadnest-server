@@ -3,7 +3,7 @@ dns.setServers(["8.8.8.8", "1.1.1.1"]);
 
 import express from "express";
 import cors from "cors";
-import { MongoClient } from "mongodb";
+import { MongoClient, ObjectId } from "mongodb";
 import "dotenv/config";
 
 const app = express();
@@ -51,6 +51,29 @@ async function startServer() {
       }
     })
 
+    // car details page
+
+    app.get("/cars/:id", async (req, res) => {
+      const {id} = req.params;
+      const result = await carCollection.findOne({ _id: new ObjectId(id) });
+      res.send(result);
+    })
+
+    // edit car details
+
+    app.patch("/cars/:id", async (req, res) => {
+        try {
+            const { _id, ...updates } = req.body; // never try to overwrite _id
+            const result = await carCollection.updateOne(
+                { _id: new ObjectId(req.params.id) },
+                { $set: updates }
+            );
+            res.send(result);
+        } catch (err) {
+          console.error(err);
+          res.status(500).send({ message: "Failed to update car" });
+        }
+    });
 
 
 
