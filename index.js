@@ -38,6 +38,24 @@ async function startServer() {
       }
     });
 
+
+    // get all cars
+
+    app.get("/cars", async (req, res) => {
+      try {
+        const cars = await carCollection.find().toArray();
+        res.send(cars);
+      } catch (err) {
+        console.error(err);
+        res.status(500).send({ message: "Failed to get cars" });
+      }
+    })
+
+
+
+
+
+
     app.listen(PORT, () => {
       console.log(`✅ Server is running on port ${PORT}`);
     });
