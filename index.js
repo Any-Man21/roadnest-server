@@ -14,11 +14,45 @@
 
 // const client = new MongoClient(process.env.MONGO_URI);
 
+// /* ---------- booking helpers ---------- */
+// const MAX_DAYS = 7;
+// const DAY_MS = 86400000;
+// const CANCEL_WINDOW_MS = 24 * 60 * 60 * 1000; // free cancellation: 24h after booking
+// const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+// // Dates are plain "YYYY-MM-DD" strings, so no time zone bugs and string compare works.
+// const todayKey = () => new Date().toISOString().slice(0, 10);
+
+// function dayNumber(key) {
+//   const [y, m, d] = key.split("-").map(Number);
+//   return Date.UTC(y, m - 1, d) / DAY_MS;
+// }
+
+// const keyFromDayNumber = (n) => new Date(n * DAY_MS).toISOString().slice(0, 10);
+
+// function isRealDate(key) {
+//   if (typeof key !== "string" || !DATE_RE.test(key)) return false;
+//   return keyFromDayNumber(dayNumber(key)) === key; // rejects Feb 30 etc.
+// }
+
+// // bookings that have not finished yet
+// const activeFilter = (extra = {}) => ({
+//   ...extra,
+//   endDate: { $gte: todayKey() },
+// });
+// const rangeFields = { projection: { _id: 0, carId: 1, startDate: 1, endDate: 1 } };
+
 // async function startServer() {
 //   try {
 //     await client.connect();
 //     const db = client.db("roadnest");
 //     const carCollection = db.collection("cars");
+//     const bookingCollection = db.collection("bookings");
+
+//     // One document per booking holds every booked day in `dates`.
+//     // This unique index makes double booking impossible, even for two simultaneous requests.
+//     await bookingCollection.createIndex({ carId: 1, dates: 1 }, { unique: true });
+
 //     console.log("🚀 You successfully connected to MongoDB!");
 
 //     app.get("/", (req, res) => {
@@ -38,50 +72,97 @@
 //       }
 //     });
 
-
-//     // get all cars
-
+//     // get all cars, newest first (each car carries its upcoming booked date ranges)
 //     app.get("/cars", async (req, res) => {
 //       try {
-//         const cars = await carCollection.find().toArray();
-//         res.send(cars);
+//         const cars = await carCollection
+//           .find()
+//           .sort({ createdAt: -1, _id: -1 })
+//           .toArray();
+//         const ranges = await bookingCollection
+//           .find(activeFilter(), rangeFields)
+//           .sort({ startDate: 1 })
+//           .toArray();
+
+//         const byCar = {};
+//         for (const r of ranges) {
+//           (byCar[r.carId] ||= []).push({
+//             startDate: r.startDate,
+//             endDate: r.endDate,
+//           });
+//         }
+
+//         res.send(
+//           cars.map((car) => ({ ...car, bookedRanges: byCar[String(car._id)] || [] }))
+//         );
 //       } catch (err) {
 //         console.error(err);
 //         res.status(500).send({ message: "Failed to get cars" });
 //       }
-//     })
-
-//     // car details page
-
-//     app.get("/cars/:id", async (req, res) => {
-//     try {
-//       const car = await carCollection.findOne({ _id: new ObjectId(req.params.id) });
-//       if (!car) return res.status(404).send({ message: "Car not found" });
-//       res.send(car);
-//     } catch (err) {
-//       res.status(400).send({ message: "Invalid car id" });
-//     }
-//   });
-
-//     // edit car details
-
-//     app.patch("/cars/:id", async (req, res) => {
-//         try {
-//             const { _id, ...updates } = req.body; // never try to overwrite _id
-//             const result = await carCollection.updateOne(
-//                 { _id: new ObjectId(req.params.id) },
-//                 { $set: updates }
-//             );
-//             res.send(result);
-//         } catch (err) {
-//           console.error(err);
-//           res.status(500).send({ message: "Failed to update car" });
-//         }
 //     });
 
+//     // get cars added by one user
+//     app.get("/my-cars", async (req, res) => {
+//       try {
+//         const { ownerId } = req.query;
+
+//         // must be a plain string. Blocks ?ownerId[$ne]=x tricks that would return every car.
+//         if (typeof ownerId !== "string" || !ownerId) {
+//           return res.status(400).send({ message: "ownerId is required" });
+//         }
+
+//         const cars = await carCollection
+//           .find({ ownerId })
+//           .sort({ createdAt: -1, _id: -1 })
+//           .toArray();
+//         res.send(cars);
+//       } catch (err) {
+//         console.error(err);
+//         res.status(500).send({ message: "Failed to get your cars" });
+//       }
+//     });
+
+//     // car details page (with upcoming booked date ranges)
+//     app.get("/cars/:id", async (req, res) => {
+//       try {
+//         const car = await carCollection.findOne({
+//           _id: new ObjectId(req.params.id),
+//         });
+//         if (!car) return res.status(404).send({ message: "Car not found" });
+
+//         const bookedRanges = await bookingCollection
+//           .find(activeFilter({ carId: String(car._id) }), rangeFields)
+//           .sort({ startDate: 1 })
+//           .toArray();
+
+//         res.send({
+//           ...car,
+//           bookedRanges: bookedRanges.map((r) => ({
+//             startDate: r.startDate,
+//             endDate: r.endDate,
+//           })),
+//         });
+//       } catch (err) {
+//         res.status(400).send({ message: "Invalid car id" });
+//       }
+//     });
+
+//     // edit car details
+//     app.patch("/cars/:id", async (req, res) => {
+//       try {
+//         const { _id, ...updates } = req.body; // never try to overwrite _id
+//         const result = await carCollection.updateOne(
+//           { _id: new ObjectId(req.params.id) },
+//           { $set: updates }
+//         );
+//         res.send(result);
+//       } catch (err) {
+//         console.error(err);
+//         res.status(500).send({ message: "Failed to update car" });
+//       }
+//     });
 
 //     // Delete Car from Website
-
 //     app.delete("/cars/:id", async (req, res) => {
 //       try {
 //         const result = await carCollection.deleteOne({
@@ -92,14 +173,201 @@
 //         console.error(err);
 //         res.status(500).send({ message: "Failed to delete car" });
 //       }
-//     })
+//     });
 
-    
-    
+//     // book a car
+//     app.post("/bookings", async (req, res) => {
+//       try {
+//         const {
+//           carId,
+//           startDate,
+//           endDate,
+//           driverNeeded,
+//           specialNote,
+//           userId,
+//           userName,
+//           userEmail,
+//           userImage,
+//         } = req.body;
 
+//         if (typeof userId !== "string" || !userId) {
+//           return res.status(400).send({ message: "Please log in to book a car." });
+//         }
+//         if (typeof carId !== "string" || !ObjectId.isValid(carId)) {
+//           return res.status(400).send({ message: "Invalid car id." });
+//         }
+//         if (!isRealDate(startDate) || !isRealDate(endDate)) {
+//           return res.status(400).send({ message: "Please pick valid dates." });
+//         }
 
+//         const start = dayNumber(startDate);
+//         const end = dayNumber(endDate);
+//         const days = end - start + 1;
 
+//         if (days < 1) {
+//           return res.status(400).send({ message: "Drop-off can’t be before pick-up." });
+//         }
+//         if (days > MAX_DAYS) {
+//           return res
+//             .status(400)
+//             .send({ message: `You can book a car for up to ${MAX_DAYS} days.` });
+//         }
+//         // The calendar enforces "starts tomorrow or later".
+//         // The server only blocks past dates, so users in any time zone are safe.
+//         if (startDate < todayKey()) {
+//           return res.status(400).send({ message: "Pick-up date can’t be in the past." });
+//         }
 
+//         // price, name and photo come from the database, never from the browser
+//         const car = await carCollection.findOne({ _id: new ObjectId(carId) });
+//         if (!car) return res.status(404).send({ message: "Car not found." });
+//         if (car.status && car.status !== "available") {
+//           return res
+//             .status(409)
+//             .send({ message: "This car is not available for booking." });
+//         }
+
+//         const dates = [];
+//         for (let n = start; n <= end; n++) dates.push(keyFromDayNumber(n));
+
+//         const pricePerDay = Number(car.pricePerDay) || 0;
+
+//         const booking = {
+//           carId,
+//           carName: car.name,
+//           carImage: car.imageUrl || "",
+//           carType: car.type || "",
+//           carLocation: car.location || "",
+//           pricePerDay,
+//           startDate,
+//           endDate,
+//           dates,
+//           days,
+//           totalPrice: days * pricePerDay,
+//           driverNeeded: driverNeeded === "Yes" ? "Yes" : "No",
+//           specialNote:
+//             typeof specialNote === "string" ? specialNote.trim().slice(0, 500) : "",
+//           userId,
+//           userName: String(userName || ""),
+//           userEmail: String(userEmail || ""),
+//           userImage: String(userImage || ""),
+//           status: "confirmed",
+//           createdAt: new Date(),
+//         };
+
+//         const result = await bookingCollection.insertOne(booking);
+//         res.status(201).send(result);
+//       } catch (err) {
+//         if (err.code === 11000) {
+//           return res.status(409).send({
+//             message:
+//               "Those dates are already booked. Please pick other dates.",
+//           });
+//         }
+//         console.error(err);
+//         res.status(500).send({ message: "Failed to book the car" });
+//       }
+//     });
+
+//     // get bookings of one user
+//     app.get("/bookings", async (req, res) => {
+//       try {
+//         const { userId } = req.query;
+
+        
+//         if (typeof userId !== "string" || !userId) {
+//           return res.status(400).send({ message: "userId is required" });
+//         }
+
+//         const bookings = await bookingCollection
+//           .find({ userId })
+//           .sort({ createdAt: -1 })
+//           .toArray();
+//         res.send(bookings);
+//       } catch (err) {
+//         console.error(err);
+//         res.status(500).send({ message: "Failed to get your bookings" });
+//       }
+//     });
+
+//     // cancel a booking: only its owner, only within 24h after booking.
+//     // The booking document holds the booked days, so deleting it frees the dates.
+//     app.delete("/bookings/:id", async (req, res) => {
+//       try {
+//         const { userId } = req.query;
+
+//         if (typeof userId !== "string" || !userId) {
+//           return res.status(400).send({ message: "userId is required" });
+//         }
+//         if (!ObjectId.isValid(req.params.id)) {
+//           return res.status(400).send({ message: "Invalid booking id" });
+//         }
+
+//         const booking = await bookingCollection.findOne({
+//           _id: new ObjectId(req.params.id),
+//           userId,
+//         });
+//         if (!booking) {
+//           return res.status(404).send({ message: "Booking not found" });
+//         }
+
+//         const age = Date.now() - new Date(booking.createdAt).getTime();
+//         if (age > CANCEL_WINDOW_MS) {
+//           return res.status(403).send({
+//             message: "Free cancellation ended 24 hours after booking.",
+//           });
+//         }
+
+//         await bookingCollection.deleteOne({ _id: booking._id });
+//         res.send({ deleted: true });
+//       } catch (err) {
+//         console.error(err);
+//         res.status(500).send({ message: "Failed to cancel the booking" });
+//       }
+//     });
+
+//     // rate a finished ride (1 to 5)
+//     app.patch("/bookings/:id/rating", async (req, res) => {
+//       try {
+//         const { userId, rating } = req.body;
+//         const value = Number(rating);
+
+//         if (typeof userId !== "string" || !userId) {
+//           return res.status(400).send({ message: "userId is required" });
+//         }
+//         if (!ObjectId.isValid(req.params.id)) {
+//           return res.status(400).send({ message: "Invalid booking id" });
+//         }
+//         if (!Number.isInteger(value) || value < 1 || value > 5) {
+//           return res.status(400).send({ message: "Rating must be 1 to 5." });
+//         }
+
+//         const booking = await bookingCollection.findOne({
+//           _id: new ObjectId(req.params.id),
+//           userId,
+//         });
+//         if (!booking) {
+//           return res.status(404).send({ message: "Booking not found" });
+//         }
+
+//         // once the last day has started in UTC. A user's local date is never
+//         // ahead of that rule, so the page never shows stars the server would refuse.
+//         if (booking.endDate > todayKey()) {
+//           return res
+//             .status(409)
+//             .send({ message: "You can rate after the ride is completed." });
+//         }
+
+//         await bookingCollection.updateOne(
+//           { _id: booking._id },
+//           { $set: { rating: value, ratedAt: new Date() } }
+//         );
+//         res.send({ rating: value });
+//       } catch (err) {
+//         console.error(err);
+//         res.status(500).send({ message: "Failed to save your rating" });
+//       }
+//     });
 
 //     app.listen(PORT, () => {
 //       console.log(`✅ Server is running on port ${PORT}`);
@@ -128,11 +396,86 @@ app.use(express.json());
 
 const client = new MongoClient(process.env.MONGO_URI);
 
+/* ---------- booking helpers ---------- */
+const MAX_DAYS = 7;
+const DAY_MS = 86400000;
+const CANCEL_WINDOW_MS = 24 * 60 * 60 * 1000; // free cancellation: 24h after booking
+const COMMISSION = 0.1; // the platform keeps 10% of every order
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+// Dates are plain "YYYY-MM-DD" strings, so no time zone bugs and string compare works.
+const todayKey = () => new Date().toISOString().slice(0, 10);
+
+function dayNumber(key) {
+  const [y, m, d] = key.split("-").map(Number);
+  return Date.UTC(y, m - 1, d) / DAY_MS;
+}
+
+const keyFromDayNumber = (n) => new Date(n * DAY_MS).toISOString().slice(0, 10);
+
+function isRealDate(key) {
+  if (typeof key !== "string" || !DATE_RE.test(key)) return false;
+  return keyFromDayNumber(dayNumber(key)) === key; // rejects Feb 30 etc.
+}
+
+const cents = (n) => Math.round(n * 100) / 100;
+
+function money(total) {
+  const platformFee = cents(total * COMMISSION);
+  return { platformFee, ownerEarning: cents(total - platformFee) };
+}
+
+// old bookings have no fee fields, so work them out on the fly
+const withMoney = (booking) => {
+  if (
+    typeof booking.platformFee === "number" &&
+    typeof booking.ownerEarning === "number"
+  ) {
+    return booking;
+  }
+  return { ...booking, ...money(Number(booking.totalPrice) || 0) };
+};
+
+// Delivery window = pick-up day + the day after.
+// The server allows one day of slack on each side, so every time zone works.
+function deliveryWindow(startDate) {
+  const today = dayNumber(todayKey());
+  const start = dayNumber(startDate);
+  if (today < start - 1) return "before";
+  if (today > start + 2) return "closed";
+  return "open";
+}
+
+// bookings that have not finished yet
+const activeFilter = (extra = {}) => ({
+  ...extra,
+  endDate: { $gte: todayKey() },
+});
+const rangeFields = { projection: { _id: 0, carId: 1, startDate: 1, endDate: 1 } };
+
 async function startServer() {
   try {
     await client.connect();
     const db = client.db("roadnest");
     const carCollection = db.collection("cars");
+    const bookingCollection = db.collection("bookings");
+
+    // One document per booking holds every booked day in `dates`.
+    // This unique index makes double booking impossible, even for two simultaneous requests.
+    await bookingCollection.createIndex({ carId: 1, dates: 1 }, { unique: true });
+
+    // does this user own the car behind the booking?
+    async function ownsBooking(booking, userId) {
+      if (booking.ownerId) return booking.ownerId === userId;
+      // old bookings have no ownerId: look at the car
+      if (!ObjectId.isValid(booking.carId)) return false;
+      const car = await carCollection.findOne(
+        { _id: new ObjectId(booking.carId) },
+        { projection: { ownerId: 1 } }
+      );
+      return car?.ownerId === userId;
+    }
+
     console.log("🚀 You successfully connected to MongoDB!");
 
     app.get("/", (req, res) => {
@@ -152,11 +495,29 @@ async function startServer() {
       }
     });
 
-    // get all cars
+    // get all cars, newest first (each car carries its upcoming booked date ranges)
     app.get("/cars", async (req, res) => {
       try {
-        const cars = await carCollection.find().toArray();
-        res.send(cars);
+        const cars = await carCollection
+          .find()
+          .sort({ createdAt: -1, _id: -1 })
+          .toArray();
+        const ranges = await bookingCollection
+          .find(activeFilter(), rangeFields)
+          .sort({ startDate: 1 })
+          .toArray();
+
+        const byCar = {};
+        for (const r of ranges) {
+          (byCar[r.carId] ||= []).push({
+            startDate: r.startDate,
+            endDate: r.endDate,
+          });
+        }
+
+        res.send(
+          cars.map((car) => ({ ...car, bookedRanges: byCar[String(car._id)] || [] }))
+        );
       } catch (err) {
         console.error(err);
         res.status(500).send({ message: "Failed to get cars" });
@@ -175,7 +536,7 @@ async function startServer() {
 
         const cars = await carCollection
           .find({ ownerId })
-          .sort({ createdAt: -1 })
+          .sort({ createdAt: -1, _id: -1 })
           .toArray();
         res.send(cars);
       } catch (err) {
@@ -184,14 +545,26 @@ async function startServer() {
       }
     });
 
-    // car details page
+    // car details page (with upcoming booked date ranges)
     app.get("/cars/:id", async (req, res) => {
       try {
         const car = await carCollection.findOne({
           _id: new ObjectId(req.params.id),
         });
         if (!car) return res.status(404).send({ message: "Car not found" });
-        res.send(car);
+
+        const bookedRanges = await bookingCollection
+          .find(activeFilter({ carId: String(car._id) }), rangeFields)
+          .sort({ startDate: 1 })
+          .toArray();
+
+        res.send({
+          ...car,
+          bookedRanges: bookedRanges.map((r) => ({
+            startDate: r.startDate,
+            endDate: r.endDate,
+          })),
+        });
       } catch (err) {
         res.status(400).send({ message: "Invalid car id" });
       }
@@ -222,6 +595,360 @@ async function startServer() {
       } catch (err) {
         console.error(err);
         res.status(500).send({ message: "Failed to delete car" });
+      }
+    });
+
+    // book a car
+    app.post("/bookings", async (req, res) => {
+      try {
+        const {
+          carId,
+          startDate,
+          endDate,
+          driverNeeded,
+          specialNote,
+          userId,
+          userName,
+          userEmail,
+          userImage,
+        } = req.body;
+
+        if (typeof userId !== "string" || !userId) {
+          return res.status(400).send({ message: "Please log in to book a car." });
+        }
+        if (typeof carId !== "string" || !ObjectId.isValid(carId)) {
+          return res.status(400).send({ message: "Invalid car id." });
+        }
+        if (!isRealDate(startDate) || !isRealDate(endDate)) {
+          return res.status(400).send({ message: "Please pick valid dates." });
+        }
+
+        const start = dayNumber(startDate);
+        const end = dayNumber(endDate);
+        const days = end - start + 1;
+
+        if (days < 1) {
+          return res.status(400).send({ message: "Drop-off can’t be before pick-up." });
+        }
+        if (days > MAX_DAYS) {
+          return res
+            .status(400)
+            .send({ message: `You can book a car for up to ${MAX_DAYS} days.` });
+        }
+        // The calendar enforces "starts tomorrow or later".
+        // The server only blocks past dates, so users in any time zone are safe.
+        if (startDate < todayKey()) {
+          return res.status(400).send({ message: "Pick-up date can’t be in the past." });
+        }
+
+        // price, name and photo come from the database, never from the browser
+        const car = await carCollection.findOne({ _id: new ObjectId(carId) });
+        if (!car) return res.status(404).send({ message: "Car not found." });
+        if (car.status && car.status !== "available") {
+          return res
+            .status(409)
+            .send({ message: "This car is not available for booking." });
+        }
+        // owners can’t book their own car (they would earn from themselves)
+        if (car.ownerId && car.ownerId === userId) {
+          return res.status(403).send({ message: "You can’t book your own car." });
+        }
+
+        const dates = [];
+        for (let n = start; n <= end; n++) dates.push(keyFromDayNumber(n));
+
+        const pricePerDay = Number(car.pricePerDay) || 0;
+        const totalPrice = cents(days * pricePerDay);
+        const { platformFee, ownerEarning } = money(totalPrice);
+
+        const booking = {
+          carId,
+          carName: car.name,
+          carImage: car.imageUrl || "",
+          carType: car.type || "",
+          carLocation: car.location || "",
+          pricePerDay,
+          startDate,
+          endDate,
+          dates,
+          days,
+          totalPrice,
+          commissionRate: COMMISSION,
+          platformFee,
+          ownerEarning,
+          ownerId: car.ownerId || "",
+          ownerName: car.ownerName || "",
+          driverNeeded: driverNeeded === "Yes" ? "Yes" : "No",
+          specialNote:
+            typeof specialNote === "string" ? specialNote.trim().slice(0, 500) : "",
+          userId,
+          userName: String(userName || ""),
+          userEmail: String(userEmail || ""),
+          userImage: String(userImage || ""),
+          status: "confirmed",
+          deliveredAt: null,
+          receivedAt: null,
+          createdAt: new Date(),
+        };
+
+        const result = await bookingCollection.insertOne(booking);
+        res.status(201).send(result);
+      } catch (err) {
+        if (err.code === 11000) {
+          return res.status(409).send({
+            message:
+              "Those dates are already booked. Please pick other dates.",
+          });
+        }
+        console.error(err);
+        res.status(500).send({ message: "Failed to book the car" });
+      }
+    });
+
+    // get bookings of one user
+    app.get("/bookings", async (req, res) => {
+      try {
+        const { userId } = req.query;
+
+        // must be a plain string, same guard as /my-cars
+        if (typeof userId !== "string" || !userId) {
+          return res.status(400).send({ message: "userId is required" });
+        }
+
+        const bookings = await bookingCollection
+          .find({ userId })
+          .sort({ createdAt: -1 })
+          .toArray();
+        res.send(bookings);
+      } catch (err) {
+        console.error(err);
+        res.status(500).send({ message: "Failed to get your bookings" });
+      }
+    });
+
+    // cancel a booking: only its owner, only within 24h after booking.
+    // The booking document holds the booked days, so deleting it frees the dates.
+    app.delete("/bookings/:id", async (req, res) => {
+      try {
+        const { userId } = req.query;
+
+        if (typeof userId !== "string" || !userId) {
+          return res.status(400).send({ message: "userId is required" });
+        }
+        if (!ObjectId.isValid(req.params.id)) {
+          return res.status(400).send({ message: "Invalid booking id" });
+        }
+
+        const booking = await bookingCollection.findOne({
+          _id: new ObjectId(req.params.id),
+          userId,
+        });
+        if (!booking) {
+          return res.status(404).send({ message: "Booking not found" });
+        }
+
+        if (booking.deliveredAt) {
+          return res.status(403).send({
+            message: "The car was already delivered, so this booking can’t be cancelled.",
+          });
+        }
+
+        const age = Date.now() - new Date(booking.createdAt).getTime();
+        if (age > CANCEL_WINDOW_MS) {
+          return res.status(403).send({
+            message: "Free cancellation ended 24 hours after booking.",
+          });
+        }
+
+        await bookingCollection.deleteOne({ _id: booking._id });
+        res.send({ deleted: true });
+      } catch (err) {
+        console.error(err);
+        res.status(500).send({ message: "Failed to cancel the booking" });
+      }
+    });
+
+    // rate a finished ride (1 to 5)
+    app.patch("/bookings/:id/rating", async (req, res) => {
+      try {
+        const { userId, rating } = req.body;
+        const value = Number(rating);
+
+        if (typeof userId !== "string" || !userId) {
+          return res.status(400).send({ message: "userId is required" });
+        }
+        if (!ObjectId.isValid(req.params.id)) {
+          return res.status(400).send({ message: "Invalid booking id" });
+        }
+        if (!Number.isInteger(value) || value < 1 || value > 5) {
+          return res.status(400).send({ message: "Rating must be 1 to 5." });
+        }
+
+        const booking = await bookingCollection.findOne({
+          _id: new ObjectId(req.params.id),
+          userId,
+        });
+        if (!booking) {
+          return res.status(404).send({ message: "Booking not found" });
+        }
+
+        // Allowed once the last day has started in UTC. A user's local date is never
+        // ahead of that rule, so the page never shows stars the server would refuse.
+        if (booking.endDate > todayKey()) {
+          return res
+            .status(409)
+            .send({ message: "You can rate after the ride is completed." });
+        }
+
+        await bookingCollection.updateOne(
+          { _id: booking._id },
+          { $set: { rating: value, ratedAt: new Date() } }
+        );
+        res.send({ rating: value });
+      } catch (err) {
+        console.error(err);
+        res.status(500).send({ message: "Failed to save your rating" });
+      }
+    });
+
+    // renter confirms "Received?" after the owner marked the car delivered
+    app.patch("/bookings/:id/received", async (req, res) => {
+      try {
+        const { userId } = req.body;
+
+        if (typeof userId !== "string" || !userId) {
+          return res.status(400).send({ message: "userId is required" });
+        }
+        if (!ObjectId.isValid(req.params.id)) {
+          return res.status(400).send({ message: "Invalid booking id" });
+        }
+
+        const booking = await bookingCollection.findOne({
+          _id: new ObjectId(req.params.id),
+          userId,
+        });
+        if (!booking) {
+          return res.status(404).send({ message: "Booking not found" });
+        }
+        if (!booking.deliveredAt) {
+          return res.status(409).send({
+            message: "The owner hasn’t marked this car as delivered yet.",
+          });
+        }
+        if (booking.receivedAt) {
+          return res
+            .status(409)
+            .send({ message: "You already confirmed this delivery." });
+        }
+
+        const win = deliveryWindow(booking.startDate);
+        if (win === "before") {
+          return res.status(409).send({
+            message: "You can confirm from the pick-up day.",
+          });
+        }
+        if (win === "closed") {
+          return res
+            .status(409)
+            .send({ message: "The confirmation window has ended." });
+        }
+
+        const receivedAt = new Date();
+        await bookingCollection.updateOne(
+          { _id: booking._id },
+          { $set: { receivedAt } }
+        );
+        res.send({ receivedAt });
+      } catch (err) {
+        console.error(err);
+        res.status(500).send({ message: "Failed to confirm the delivery" });
+      }
+    });
+
+    // orders: bookings made on the cars one user owns
+    app.get("/orders", async (req, res) => {
+      try {
+        const { ownerId } = req.query;
+
+        // must be a plain string, same guard as /my-cars
+        if (typeof ownerId !== "string" || !ownerId) {
+          return res.status(400).send({ message: "ownerId is required" });
+        }
+
+        // rides that have ended are marked completed
+        await bookingCollection.updateMany(
+          { endDate: { $lt: todayKey() }, status: { $ne: "completed" } },
+          { $set: { status: "completed", completedAt: new Date() } }
+        );
+
+        const myCars = await carCollection
+          .find({ ownerId }, { projection: { _id: 1 } })
+          .toArray();
+        const carIds = myCars.map((c) => String(c._id));
+
+        const orders = await bookingCollection
+          .find({ $or: [{ ownerId }, { carId: { $in: carIds } }] })
+          .sort({ createdAt: -1 })
+          .toArray();
+
+        res.send(orders.map(withMoney));
+      } catch (err) {
+        console.error(err);
+        res.status(500).send({ message: "Failed to get your orders" });
+      }
+    });
+
+    // owner presses "Car Delivered"
+    app.patch("/orders/:id/deliver", async (req, res) => {
+      try {
+        const { ownerId } = req.body;
+
+        if (typeof ownerId !== "string" || !ownerId) {
+          return res.status(400).send({ message: "ownerId is required" });
+        }
+        if (!ObjectId.isValid(req.params.id)) {
+          return res.status(400).send({ message: "Invalid order id" });
+        }
+
+        const booking = await bookingCollection.findOne({
+          _id: new ObjectId(req.params.id),
+        });
+        if (!booking || !(await ownsBooking(booking, ownerId))) {
+          return res.status(404).send({ message: "Order not found" });
+        }
+        if (booking.deliveredAt) {
+          return res
+            .status(409)
+            .send({ message: "Already marked as delivered." });
+        }
+
+        const win = deliveryWindow(booking.startDate);
+        if (win === "before") {
+          return res.status(409).send({
+            message: "You can mark the car as delivered from the pick-up day.",
+          });
+        }
+        if (win === "closed") {
+          return res
+            .status(409)
+            .send({ message: "The delivery window has ended." });
+        }
+
+        const deliveredAt = new Date();
+        const result = await bookingCollection.updateOne(
+          { _id: booking._id, deliveredAt: null },
+          { $set: { deliveredAt } }
+        );
+        if (result.matchedCount === 0) {
+          return res
+            .status(409)
+            .send({ message: "Already marked as delivered." });
+        }
+
+        res.send({ deliveredAt });
+      } catch (err) {
+        console.error(err);
+        res.status(500).send({ message: "Failed to mark the car as delivered" });
       }
     });
 
