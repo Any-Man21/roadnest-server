@@ -16,7 +16,11 @@ const PORT = process.env.PORT || 5000;
 app.use(cors());
 app.use(express.json());
 
-const client = new MongoClient(process.env.MONGO_URI);
+const client = new MongoClient(process.env.MONGO_URI, {
+  maxPoolSize: 10,
+  minPoolSize: 0,
+  serverSelectionTimeoutMS: 10000,
+});
 
 /* ---------- booking helpers ---------- */
 const MAX_DAYS = 7;
@@ -109,9 +113,13 @@ async function startServer() {
     });
 
     // JWKS
+    if (!process.env.CLIENT_URL) {
+      throw new Error("CLIENT_URL is missing.");
+    }
+
     const JWKS = createRemoteJWKSet(
-      new URL(`${process.env.CLIENT_URL}/api/auth/jwks`)
-    )
+      new URL("/api/auth/jwks", process.env.CLIENT_URL)
+    );
 
 
 
