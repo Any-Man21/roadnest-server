@@ -1,3 +1,6 @@
+
+
+
 import dns from "node:dns";
 dns.setServers(["8.8.8.8", "1.1.1.1"]);
 
@@ -18,7 +21,8 @@ const client = new MongoClient(process.env.MONGO_URI);
 /* ---------- booking helpers ---------- */
 const MAX_DAYS = 7;
 const DAY_MS = 86400000;
-const CANCEL_WINDOW_MS = 24 * 60 * 60 * 1000; // free cancellation: 24h after booking
+const CANCEL_WINDOW_MS = 24 * 60 * 60 * 1000; // renter: free cancellation 24h after booking
+const OWNER_CANCEL_WINDOW_MS = 5 * 60 * 60 * 1000; // owner: can cancel a ride 5h after booking
 const COMMISSION = 0.1; // the platform keeps 10% of every order
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -78,6 +82,9 @@ async function startServer() {
     const db = client.db("roadnest");
     const carCollection = db.collection("cars");
     const bookingCollection = db.collection("bookings");
+    // rides cancelled by the owner. The booking itself is deleted from `bookings`,
+    // this notice (without `dates`) keeps the renter's card on screen.
+    const cancelledCollection = db.collection("cancelledBookings");
 
     // One document per booking holds every booked day in `dates`.
     // This unique index makes double booking impossible, even for two simultaneous requests.
@@ -103,7 +110,7 @@ async function startServer() {
 
     // JWKS
     const JWKS = createRemoteJWKSet(
-      new URL("http://localhost:3000/api/auth/jwks")
+      new URL(`${process.env.CLIENT_URL}/api/auth/jwks`)
     )
 
 
@@ -148,6 +155,31 @@ async function startServer() {
             });
           }
        }
+
+
+            // Guests allowed. If a token is sent it must be valid, otherwise 401.
+      async function optionalToken(req, res, next) {
+        const authHeader = req.headers.authorization;
+
+        // no token = guest, continue without req.user
+        if (!authHeader) return next();
+
+        const [scheme, token] = authHeader.split(" ");
+        if (scheme !== "Bearer" || !token) {
+          return res.status(401).send({ message: "Invalid authorization header" });
+        }
+
+        try {
+          const { payload } = await jwtVerify(token, JWKS);
+          const userId = payload.sub || payload.id;
+          if (typeof userId === "string" && userId) {
+            req.user = { id: userId };
+          }
+          next();
+        } catch (err) {
+          return res.status(401).send({ message: "Invalid or expired token" });
+        }
+      }
     
    
 
@@ -318,7 +350,7 @@ async function startServer() {
 
 
     // car details page (with upcoming booked date ranges)
-    app.get("/cars/:id",  async (req, res) => {
+    app.get("/cars/:id", optionalToken,  async (req, res) => {
       try {
         const car = await carCollection.findOne({
           _id: new ObjectId(req.params.id),
@@ -342,12 +374,64 @@ async function startServer() {
       }
     });
 
-    // edit car details
-    app.patch("/cars/:id", async (req, res) => {
+    // edit car details: owner only
+    app.patch("/cars/:id", verifyToken, async (req, res) => {
       try {
-        const { _id, ...updates } = req.body; // never try to overwrite _id
+        if (!ObjectId.isValid(req.params.id)) {
+          return res.status(400).send({ message: "Invalid car id" });
+        }
+
+        const carId = new ObjectId(req.params.id);
+        const car = await carCollection.findOne(
+          { _id: carId },
+          { projection: { ownerId: 1 } }
+        );
+        if (!car) return res.status(404).send({ message: "Car not found" });
+
+        // only the owner. Cars with no ownerId can't be edited by anyone.
+        if (!car.ownerId || car.ownerId !== req.user.id) {
+          return res
+            .status(403)
+            .send({ message: "You can only edit your own cars." });
+        }
+
+        // only these fields can change. ownerId, createdAt etc. are never touched.
+        const body = req.body || {};
+        const updates = {};
+
+        for (const key of ["name", "type", "imageUrl", "location", "description"]) {
+          if (body[key] !== undefined) {
+            if (typeof body[key] !== "string" || !body[key].trim()) {
+              return res.status(400).send({ message: `Invalid ${key}.` });
+            }
+            updates[key] = body[key].trim();
+          }
+        }
+
+        for (const key of ["pricePerDay", "seats"]) {
+          if (body[key] !== undefined) {
+            const value = Number(body[key]);
+            if (!Number.isFinite(value) || value < 1) {
+              return res.status(400).send({ message: `Invalid ${key}.` });
+            }
+            updates[key] = value;
+          }
+        }
+
+        if (body.status !== undefined) {
+          if (!["available", "unavailable", "maintenance"].includes(body.status)) {
+            return res.status(400).send({ message: "Invalid status." });
+          }
+          updates.status = body.status;
+        }
+
+        if (Object.keys(updates).length === 0) {
+          return res.status(400).send({ message: "Nothing to update." });
+        }
+
+        // ownerId is in the filter too, so the check holds even under a race
         const result = await carCollection.updateOne(
-          { _id: new ObjectId(req.params.id) },
+          { _id: carId, ownerId: req.user.id },
           { $set: updates }
         );
         res.send(result);
@@ -357,18 +441,50 @@ async function startServer() {
       }
     });
 
-    // Delete Car from Website
-    app.delete("/cars/:id", async (req, res) => {
+    // Delete Car from Website: owner only
+    app.delete("/cars/:id", verifyToken, async (req, res) => {
       try {
+        if (!ObjectId.isValid(req.params.id)) {
+          return res.status(400).send({ message: "Invalid car id" });
+        }
+
+        const carId = new ObjectId(req.params.id);
+        const car = await carCollection.findOne(
+          { _id: carId },
+          { projection: { ownerId: 1 } }
+        );
+        if (!car) return res.status(404).send({ message: "Car not found" });
+
+        // only the owner. Cars with no ownerId can't be deleted by anyone.
+        if (!car.ownerId || car.ownerId !== req.user.id) {
+          return res
+            .status(403)
+            .send({ message: "You can only delete your own cars." });
+        }
+
         const result = await carCollection.deleteOne({
-          _id: new ObjectId(req.params.id),
+          _id: carId,
+          ownerId: req.user.id,
         });
+
+        if (result.deletedCount === 1) {
+          // Renters keep their booking card, now marked "Car removed from service".
+          // GET /orders skips carRemoved bookings, so the owner's orders disappear.
+          await bookingCollection.updateMany(
+            { carId: String(carId) },
+            { $set: { carRemoved: true, carRemovedAt: new Date() } }
+          );
+        }
+
         res.send(result);
       } catch (err) {
         console.error(err);
         res.status(500).send({ message: "Failed to delete car" });
       }
     });
+
+
+    
 
     // book a car
     app.post("/bookings", verifyToken, async (req, res) => {
@@ -499,6 +615,41 @@ async function startServer() {
       }
     });
 
+    // rides the owner cancelled: the renter's cards that stay on screen
+    app.get("/cancelled-bookings", verifyToken, async (req, res) => {
+      try {
+        const notices = await cancelledCollection
+          .find({ userId: req.user.id })
+          .sort({ cancelledAt: -1 })
+          .toArray();
+        res.send(notices);
+      } catch (err) {
+        console.error(err);
+        res.status(500).send({ message: "Failed to get cancelled rides" });
+      }
+    });
+
+    // renter removes a "canceled by owner" card
+    app.delete("/cancelled-bookings/:id", verifyToken, async (req, res) => {
+      try {
+        if (!ObjectId.isValid(req.params.id)) {
+          return res.status(400).send({ message: "Invalid id" });
+        }
+
+        const result = await cancelledCollection.deleteOne({
+          _id: new ObjectId(req.params.id),
+          userId: req.user.id,
+        });
+        if (result.deletedCount === 0) {
+          return res.status(404).send({ message: "Notice not found" });
+        }
+        res.send({ deleted: true });
+      } catch (err) {
+        console.error(err);
+        res.status(500).send({ message: "Failed to remove the card" });
+      }
+    });
+
     // cancel a booking: only its owner, only within 24h after booking.
     // The booking document holds the booked days, so deleting it frees the dates.
     app.delete("/bookings/:id", verifyToken, async (req, res) => {
@@ -518,6 +669,12 @@ async function startServer() {
         });
         if (!booking) {
           return res.status(404).send({ message: "Booking not found" });
+        }
+
+        // car was removed from service: the renter can always clear the card
+        if (booking.carRemoved) {
+          await bookingCollection.deleteOne({ _id: booking._id });
+          return res.send({ deleted: true });
         }
 
         if (booking.deliveredAt) {
@@ -651,13 +808,19 @@ async function startServer() {
 
         const carIds = myCars.map((car) => String(car._id));
 
+    // Orders of removed cars are skipped, so they disappear for the owner
+        const mine = {
+          $or: [
+            { ownerId },
+            { carId: { $in: carIds } },
+          ],
+          carRemoved: { $ne: true },
+        };
+
     // Update only this owner's expired orders
         await bookingCollection.updateMany(
           {
-            $or: [
-              { ownerId },
-              { carId: { $in: carIds } },
-            ],
+            ...mine,
             endDate: { $lt: todayKey() },
             status: { $ne: "completed" },
           },
@@ -670,12 +833,7 @@ async function startServer() {
         );
 
         const orders = await bookingCollection
-          .find({
-            $or: [
-              { ownerId },
-              { carId: { $in: carIds } },
-            ],
-          })
+          .find(mine)
           .sort({ createdAt: -1 })
           .toArray();
 
@@ -710,7 +868,7 @@ async function startServer() {
         });
 
         // Verify that this order belongs to the authenticated owner
-        if (!booking || !(await ownsBooking(booking, ownerId))) {
+        if (!booking || booking.carRemoved || !(await ownsBooking(booking, ownerId))) {
           return res.status(404).send({
             message: "Order not found",
           });
@@ -762,6 +920,67 @@ async function startServer() {
         res.status(500).send({
           message: "Failed to mark the car as delivered",
         });
+      }
+    });
+
+    // Owner cancels a ride: only the car's owner, only within 5h after it was booked,
+    // and only before delivery.
+    app.delete("/orders/:id", verifyToken, async (req, res) => {
+      try {
+        const ownerId = req.user.id;
+
+        if (!ObjectId.isValid(req.params.id)) {
+          return res.status(400).send({ message: "Invalid order id" });
+        }
+
+        const booking = await bookingCollection.findOne({
+          _id: new ObjectId(req.params.id),
+        });
+
+        if (!booking || booking.carRemoved || !(await ownsBooking(booking, ownerId))) {
+          return res.status(404).send({ message: "Order not found" });
+        }
+
+        if (booking.deliveredAt) {
+          return res.status(403).send({
+            message: "The car was already delivered, so this ride can’t be cancelled.",
+          });
+        }
+
+        const bookedAt = new Date(booking.createdAt).getTime();
+        if (!Number.isFinite(bookedAt) || Date.now() - bookedAt > OWNER_CANCEL_WINDOW_MS) {
+          return res.status(403).send({
+            message: "You can only cancel a ride within 5 hours after it was booked.",
+          });
+        }
+
+        // delete the booking: the dates are free for everyone again
+        const result = await bookingCollection.deleteOne({
+          _id: booking._id,
+          deliveredAt: null,
+        });
+        if (result.deletedCount === 0) {
+          return res
+            .status(409)
+            .send({ message: "This order just changed. Please refresh the page." });
+        }
+
+        // keep a notice (no `dates`) so the renter's card stays: "Ride canceled by owner"
+        const { dates, ...notice } = booking;
+        try {
+          await cancelledCollection.insertOne({
+            ...notice,
+            cancelledBy: "owner",
+            cancelledAt: new Date(),
+          });
+        } catch (err) {
+          console.error("Cancel notice failed:", err);
+        }
+
+        res.send({ deleted: true });
+      } catch (err) {
+        console.error("Owner cancel error:", err);
+        res.status(500).send({ message: "Failed to cancel the ride" });
       }
     });
 
